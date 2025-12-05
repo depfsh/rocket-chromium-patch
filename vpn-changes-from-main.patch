@@ -1,0 +1,474 @@
+From 09ca859ef2f6e57d2e8c1d116e509933a94571be Mon Sep 17 00:00:00 2001
+From: Jack R <Jack@localhost>
+Date: Fri, 5 Dec 2025 09:43:35 +0000
+Subject: [PATCH 1/2] =?UTF-8?q?=E9=9B=86=E6=88=90clash=E5=90=8E=EF=BC=8C?=
+ =?UTF-8?q?=E7=BC=96=E8=AF=91=E9=A6=96=E6=AC=A1=E9=80=9A=E8=BF=87?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ chrome/BUILD.gn                             |   5 +-
+ chrome/app/chrome_main_delegate.cc          |  17 +++
+ chrome/browser/BUILD.gn                     |   4 +
+ chrome/browser/chrome_browser_main.cc       |   8 ++
+ chrome/browser/mihomo/mihomo_embed.cc       | 152 ++++++++++++++++++++
+ chrome/browser/mihomo/mihomo_embed.h        |  76 ++++++++++
+ chrome/browser/mihomo/mihomo_extra_parts.cc |  41 ++++++
+ chrome/browser/mihomo/mihomo_extra_parts.h  |  33 +++++
+ third_party/mihomo                          |   1 +
+ 9 files changed, 336 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/mihomo/mihomo_embed.cc
+ create mode 100644 chrome/browser/mihomo/mihomo_embed.h
+ create mode 100644 chrome/browser/mihomo/mihomo_extra_parts.cc
+ create mode 100644 chrome/browser/mihomo/mihomo_extra_parts.h
+ create mode 160000 third_party/mihomo
+
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index fa036801ce974..47e6c41ab4876 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -310,7 +310,10 @@ if (!is_android && !is_mac) {
+         "//chrome/common:buildflags",
+       ]
+ 
+-      data_deps += [ "//components/crash/core/app:chrome_crashpad_handler" ]
++      data_deps += [
++        "//components/crash/core/app:chrome_crashpad_handler",
++        "//third_party/mihomo:mihomo_runtime",
++      ]
+ 
+       ldflags = []
+ 
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index 3cbbd15853a70..b66d5c289c697 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -18,6 +18,7 @@
+ #include "base/features.h"
+ #include "base/files/file_path.h"
+ #include "base/files/file_util.h"
++#include "base/native_library.h"
+ #include "base/functional/bind.h"
+ #include "base/i18n/rtl.h"
+ #include "base/immediate_crash.h"
+@@ -1042,6 +1043,22 @@ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
+ 
+   const base::CommandLine& command_line =
+       *base::CommandLine::ForCurrentProcess();
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++  if (!command_line.HasSwitch(switches::kProxyServer) &&
++      !command_line.HasSwitch(switches::kNoProxyServer) &&
++      !command_line.HasSwitch(switches::kProxyPacUrl) &&
++      !command_line.HasSwitch(switches::kProxyAutoDetect)) {
++    base::FilePath exe_dir;
++    if (base::PathService::Get(base::DIR_EXE, &exe_dir)) {
++      base::FilePath mihomo_lib =
++          exe_dir.AppendASCII(base::GetNativeLibraryName("mihomo"));
++      if (base::PathExists(mihomo_lib)) {
++        base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
++            switches::kProxyServer, "socks5://127.0.0.1:7890");
++      }
++    }
++  }
++#endif
+ 
+   // Only allow disabling web security via the command-line flag if the user has
+   // specified a distinct profile directory. This still enables tests to disable
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 51505c2cf80d1..ff1e3e9b23d40 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -673,6 +673,10 @@ static_library("browser") {
+     "memory/enterprise_memory_limit_pref_observer.h",
+     "memory_details.cc",
+     "memory_details.h",
++    "mihomo/mihomo_embed.cc",
++    "mihomo/mihomo_embed.h",
++    "mihomo/mihomo_extra_parts.cc",
++    "mihomo/mihomo_extra_parts.h",
+     "metrics/accessibility_state_provider.cc",
+     "metrics/accessibility_state_provider.h",
+     "metrics/cached_metrics_profile.cc",
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+index d347c428acc41..5300a8b9bb066 100644
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -326,6 +326,10 @@
+ #include "chrome/browser/chrome_browser_main_posix.h"
+ #endif
+ 
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#include "chrome/browser/mihomo/mihomo_extra_parts.h"
++#endif
++
+ #if BUILDFLAG(IS_LINUX)
+ #include "chrome/browser/chrome_browser_main_extra_parts_linux.h"
+ #elif BUILDFLAG(IS_OZONE)
+@@ -769,6 +773,10 @@ std::unique_ptr<content::BrowserMainParts> ChromeBrowserMainParts::Create(
+   main_parts->AddParts(std::make_unique<ChromeBrowserMainExtraPartsOzone>());
+ #endif
+ 
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++  main_parts->AddParts(std::make_unique<ChromeBrowserMainExtraPartsMihomo>());
++#endif
++
+   main_parts->AddParts(
+       std::make_unique<ChromeBrowserMainExtraPartsPerformanceMonitor>());
+ 
+diff --git a/chrome/browser/mihomo/mihomo_embed.cc b/chrome/browser/mihomo/mihomo_embed.cc
+new file mode 100644
+index 0000000000000..55a0e3d673706
+--- /dev/null
++++ b/chrome/browser/mihomo/mihomo_embed.cc
+@@ -0,0 +1,152 @@
++// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/mihomo/mihomo_embed.h"
++
++#include "base/logging.h"
++#include "base/native_library.h"
++#include "base/path_service.h"
++#include "build/build_config.h"
++
++namespace mihomo {
++
++MihomoEmbed::MihomoEmbed() : MihomoEmbed(GetDefaultLibraryPath()) {}
++
++MihomoEmbed::MihomoEmbed(const base::FilePath& library_path)
++    : library_path_(library_path) {}
++
++MihomoEmbed::~MihomoEmbed() {
++  Stop();
++  base::AutoLock hold(lock_);
++  UnloadLibraryLocked();
++}
++
++bool MihomoEmbed::Init(const base::FilePath& config_path) {
++  base::AutoLock hold(lock_);
++  if (!CallInitLocked(config_path)) {
++    return false;
++  }
++  initialized_ = true;
++  return true;
++}
++
++bool MihomoEmbed::Start() {
++  base::AutoLock hold(lock_);
++  if (!initialized_) {
++    if (!CallInitLocked(base::FilePath())) {
++      return false;
++    }
++    initialized_ = true;
++  }
++
++  if (!start_fn_) {
++    return false;
++  }
++
++  const int rc = start_fn_();
++  if (rc != 0) {
++    return false;
++  }
++  return true;
++}
++
++void MihomoEmbed::Stop() {
++  base::AutoLock hold(lock_);
++  if (stop_fn_ && initialized_) {
++    stop_fn_();
++  }
++}
++
++MihomoEmbed::State MihomoEmbed::GetState() const {
++  base::AutoLock hold(lock_);
++  return CallStatusLocked();
++}
++
++base::FilePath MihomoEmbed::GetDefaultLibraryPath() {
++  base::FilePath exe_dir;
++  if (!base::PathService::Get(base::DIR_EXE, &exe_dir)) {
++    return base::FilePath();
++  }
++  return exe_dir.AppendASCII(base::GetNativeLibraryName("mihomo"));
++}
++
++bool MihomoEmbed::LoadLibraryIfNeeded() {
++  if (library_) {
++    return true;
++  }
++
++  if (library_path_.empty()) {
++    LOG(ERROR) << "No Mihomo library path provided";
++    return false;
++  }
++
++  base::NativeLibraryLoadError error;
++  library_ = base::LoadNativeLibrary(library_path_, &error);
++  if (!library_) {
++    LOG(ERROR) << "Failed to load Mihomo library from " << library_path_
++               << ": " << error.ToString();
++    return false;
++  }
++
++  init_fn_ = reinterpret_cast<InitFn>(
++      base::GetFunctionPointerFromNativeLibrary(library_, "MihomoInit"));
++  start_fn_ = reinterpret_cast<StartFn>(
++      base::GetFunctionPointerFromNativeLibrary(library_, "MihomoStart"));
++  stop_fn_ = reinterpret_cast<StopFn>(
++      base::GetFunctionPointerFromNativeLibrary(library_, "MihomoStop"));
++  status_fn_ = reinterpret_cast<StatusFn>(
++      base::GetFunctionPointerFromNativeLibrary(library_, "MihomoStatus"));
++
++  if (!init_fn_ || !start_fn_ || !stop_fn_ || !status_fn_) {
++    LOG(ERROR) << "Mihomo library missing required exports";
++    UnloadLibraryLocked();
++    return false;
++  }
++
++  return true;
++}
++
++bool MihomoEmbed::CallInitLocked(const base::FilePath& config_path) {
++  if (!LoadLibraryIfNeeded()) {
++    return false;
++  }
++
++  const std::string path_utf8 =
++      config_path.empty() ? std::string() : config_path.AsUTF8Unsafe();
++
++  const int rc = init_fn_(path_utf8.empty()
++                              ? nullptr
++                              : const_cast<char*>(path_utf8.c_str()));
++  return rc == 0;
++}
++
++MihomoEmbed::State MihomoEmbed::CallStatusLocked() const {
++  if (!status_fn_) {
++    return State::kStopped;
++  }
++
++  const int rc = status_fn_();
++  if (rc == 1) {
++    return State::kRunning;
++  }
++  if (rc == 0) {
++    return State::kStopped;
++  }
++  return State::kFailed;
++}
++
++void MihomoEmbed::UnloadLibraryLocked() {
++  if (!library_) {
++    return;
++  }
++  base::UnloadNativeLibrary(library_);
++  library_ = nullptr;
++  init_fn_ = nullptr;
++  start_fn_ = nullptr;
++  stop_fn_ = nullptr;
++  status_fn_ = nullptr;
++  initialized_ = false;
++}
++
++}  // namespace mihomo
+diff --git a/chrome/browser/mihomo/mihomo_embed.h b/chrome/browser/mihomo/mihomo_embed.h
+new file mode 100644
+index 0000000000000..0f601657e152b
+--- /dev/null
++++ b/chrome/browser/mihomo/mihomo_embed.h
+@@ -0,0 +1,76 @@
++// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_MIHOMO_MIHOMO_EMBED_H_
++#define CHROME_BROWSER_MIHOMO_MIHOMO_EMBED_H_
++
++#include <string>
++
++#include "base/files/file_path.h"
++#include "base/native_library.h"
++#include "base/synchronization/lock.h"
++
++namespace mihomo {
++
++// Lightweight wrapper for the c-shared Mihomo library.
++class MihomoEmbed {
++ public:
++  enum class State {
++    kStopped = 0,
++    kRunning = 1,
++    kFailed = -1,
++  };
++
++  MihomoEmbed();
++  explicit MihomoEmbed(const base::FilePath& library_path);
++  MihomoEmbed(const MihomoEmbed&) = delete;
++  MihomoEmbed& operator=(const MihomoEmbed&) = delete;
++  ~MihomoEmbed();
++
++  // Initializes Mihomo with the provided config path. If not called explicitly,
++  // Start() will initialize with the default config path.
++  bool Init(const base::FilePath& config_path);
++
++  // Starts Mihomo. Returns true on success.
++  bool Start();
++
++  // Stops Mihomo if it is running.
++  void Stop();
++
++  // Queries the current state via MihomoStatus. If the library is not loaded,
++  // returns kStopped.
++  State GetState() const;
++
++  // Path from which the library will be loaded.
++  const base::FilePath& library_path() const { return library_path_; }
++
++  // Default path where the shared library is expected (next to the executable).
++  static base::FilePath GetDefaultLibraryPath();
++
++ private:
++  using InitFn = int (*)(char*);
++  using StartFn = int (*)();
++  using StopFn = int (*)();
++  using StatusFn = int (*)();
++
++  bool LoadLibraryIfNeeded();
++  bool CallInitLocked(const base::FilePath& config_path);
++  State CallStatusLocked() const;
++  void UnloadLibraryLocked();
++
++  mutable base::Lock lock_;
++  base::FilePath library_path_;
++
++  base::NativeLibrary library_ = nullptr;
++  InitFn init_fn_ = nullptr;
++  StartFn start_fn_ = nullptr;
++  StopFn stop_fn_ = nullptr;
++  StatusFn status_fn_ = nullptr;
++
++  bool initialized_ = false;
++};
++
++}  // namespace mihomo
++
++#endif  // CHROME_BROWSER_MIHOMO_MIHOMO_EMBED_H_
+diff --git a/chrome/browser/mihomo/mihomo_extra_parts.cc b/chrome/browser/mihomo/mihomo_extra_parts.cc
+new file mode 100644
+index 0000000000000..bd580af2e6c8b
+--- /dev/null
++++ b/chrome/browser/mihomo/mihomo_extra_parts.cc
+@@ -0,0 +1,41 @@
++// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/mihomo/mihomo_extra_parts.h"
++
++#include "base/files/file_path.h"
++#include "base/logging.h"
++
++ChromeBrowserMainExtraPartsMihomo::ChromeBrowserMainExtraPartsMihomo() =
++    default;
++ChromeBrowserMainExtraPartsMihomo::~ChromeBrowserMainExtraPartsMihomo() =
++    default;
++
++void ChromeBrowserMainExtraPartsMihomo::PreMainMessageLoopRun() {
++  embed_ = std::make_unique<mihomo::MihomoEmbed>();
++
++  if (!embed_->Init(base::FilePath())) {
++    LOG(ERROR) << "Mihomo init failed";
++    return;
++  }
++
++  if (!embed_->Start()) {
++    LOG(ERROR) << "Mihomo start failed";
++    return;
++  }
++
++  started_ = true;
++  LOG(INFO) << "Mihomo started via embedded shared library";
++}
++
++void ChromeBrowserMainExtraPartsMihomo::PostMainMessageLoopRun() {
++  if (!embed_) {
++    return;
++  }
++  if (started_) {
++    embed_->Stop();
++    started_ = false;
++  }
++  embed_.reset();
++}
+diff --git a/chrome/browser/mihomo/mihomo_extra_parts.h b/chrome/browser/mihomo/mihomo_extra_parts.h
+new file mode 100644
+index 0000000000000..8fa53ef4c34b4
+--- /dev/null
++++ b/chrome/browser/mihomo/mihomo_extra_parts.h
+@@ -0,0 +1,33 @@
++// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_MIHOMO_MIHOMO_EXTRA_PARTS_H_
++#define CHROME_BROWSER_MIHOMO_MIHOMO_EXTRA_PARTS_H_
++
++#include <memory>
++
++#include "chrome/browser/chrome_browser_main_extra_parts.h"
++#include "chrome/browser/mihomo/mihomo_embed.h"
++
++// Starts/stops Mihomo on browser startup/shutdown.
++class ChromeBrowserMainExtraPartsMihomo
++    : public ChromeBrowserMainExtraParts {
++ public:
++  ChromeBrowserMainExtraPartsMihomo();
++  ChromeBrowserMainExtraPartsMihomo(
++      const ChromeBrowserMainExtraPartsMihomo&) = delete;
++  ChromeBrowserMainExtraPartsMihomo& operator=(
++      const ChromeBrowserMainExtraPartsMihomo&) = delete;
++  ~ChromeBrowserMainExtraPartsMihomo() override;
++
++  // ChromeBrowserMainExtraParts:
++  void PreMainMessageLoopRun() override;
++  void PostMainMessageLoopRun() override;
++
++ private:
++  std::unique_ptr<mihomo::MihomoEmbed> embed_;
++  bool started_ = false;
++};
++
++#endif  // CHROME_BROWSER_MIHOMO_MIHOMO_EXTRA_PARTS_H_
+diff --git a/third_party/mihomo b/third_party/mihomo
+new file mode 160000
+index 0000000000000..a001b1b11008b
+--- /dev/null
++++ b/third_party/mihomo
+@@ -0,0 +1 @@
++Subproject commit a001b1b11008ba469442e5e59b058dd032263470
+-- 
+2.34.1
+
+
+From d8e3e346d23ce4b2454d252b54847d08b6954274 Mon Sep 17 00:00:00 2001
+From: Jack R <Jack@localhost>
+Date: Fri, 5 Dec 2025 13:14:38 +0000
+Subject: [PATCH 2/2] update
+
+---
+ third_party/mihomo | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/third_party/mihomo b/third_party/mihomo
+index a001b1b11008b..0ab1d960adaa0 160000
+--- a/third_party/mihomo
++++ b/third_party/mihomo
+@@ -1 +1 @@
+-Subproject commit a001b1b11008ba469442e5e59b058dd032263470
++Subproject commit 0ab1d960adaa003bda4cd82f9249fb87756b1ff6
+-- 
+2.34.1
+
